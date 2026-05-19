@@ -1,179 +1,240 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 
-export default function CameraPage() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [hasPermission, setHasPermission] = useState<boolean | null>(null);
+export default function CameraApp() {
+  const [isRecording, setIsRecording] = useState(false);
+  const [isReplaying, setIsReplaying] = useState(false);
+  const [recordedUrl, setRecordedUrl] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
+  const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
 
+  const previewVideoRef = useRef<HTMLVideoElement>(null);
+  const replayVideoRef = useRef<HTMLVideoElement>(null);
+  
+  const streamRef = useRef<MediaStream | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const recordingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastRecordedUrlRef = useRef<string | null>(null);
+
+  // 카메라 초기화 및 전환
   useEffect(() => {
-    let stream: MediaStream | null = null;
+    let currentStream: MediaStream | null = null;
 
-    const startCamera = async () => {
-      // 브라우저에서 mediaDevices API 지원 여부 확인
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        console.error("Media devices API가 지원되지 않습니다.");
-        setHasPermission(false);
-        return;
-      }
-
+    const initCamera = async () => {
       try {
-        // 해상도 제약을 풀고 가장 기본적인 전면 카메라 옵션만 사용해 호환성 극대화
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: "user",
-          },
-          audio: false,
-        });
-
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          // iOS 사파리/크롬에서는 명시적으로 play()를 호출해줘야 검은 화면이 안 나오는 경우가 많습니다.
-          videoRef.current.onloadedmetadata = () => {
-            videoRef.current?.play().catch((e) => {
-              console.error("비디오 재생 실패:", e);
-            });
-          };
+        // 기존 스트림 정리
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
         }
-        setHasPermission(true);
-      } catch (err) {
-        console.error("Camera access error:", err);
-        setHasPermission(false);
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false, // 추후 싱크/인스턴스 문제 방지
+          video: { facingMode }, // 상태값에 따라 전면/후면 전환
+        });
+        
+        streamRef.current = stream;
+        currentStream = stream;
+
+        if (previewVideoRef.current) {
+          previewVideoRef.current.srcObject = stream;
+        }
+      } catch (error) {
+        console.error("카메라 접근 에러:", error);
       }
     };
 
-    startCamera();
+    initCamera();
 
-    // 컴포넌트 언마운트 시 카메라 스트림 해제
     return () => {
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop());
+      // 컴포넌트 언마운트 또는 facingMode 변경 시 이전 스트림 정리
+      if (currentStream) {
+        currentStream.getTracks().forEach((track) => track.stop());
       }
+    };
+  }, [facingMode]);
+
+  // 메모리 및 타이머 해제
+  useEffect(() => {
+    return () => {
+      if (lastRecordedUrlRef.current) {
+        URL.revokeObjectURL(lastRecordedUrlRef.current);
+      }
+      if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+      if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current);
     };
   }, []);
 
+  const toggleCamera = useCallback(() => {
+    setFacingMode((prev) => (prev === "user" ? "environment" : "user"));
+  }, []);
+
+  const startRecording = useCallback(() => {
+    if (!streamRef.current || isRecording) return;
+
+    // 이전 URL 메모리 해제
+    if (lastRecordedUrlRef.current) {
+      URL.revokeObjectURL(lastRecordedUrlRef.current);
+    }
+    
+    setRecordedUrl(null);
+    setIsReplaying(false);
+    setProgress(0);
+    chunksRef.current = [];
+
+    // MediaRecorder 설정 (브라우저 호환성을 위해 기본 설정 사용)
+    const recorder = new MediaRecorder(streamRef.current);
+    recorderRef.current = recorder;
+
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        chunksRef.current.push(e.data);
+      }
+    };
+
+    recorder.onstop = () => {
+      // iOS 등 다양한 환경 호환성을 위해 타입 없이 Blob 생성
+      const blob = new Blob(chunksRef.current);
+      const url = URL.createObjectURL(blob);
+      lastRecordedUrlRef.current = url;
+      setRecordedUrl(url);
+      setIsReplaying(true);
+      setIsRecording(false);
+      setProgress(0);
+    };
+
+    // 녹화 시작
+    recorder.start(10); // 타임슬라이스 주기로 데이터를 더 자주 받음
+    setIsRecording(true);
+
+    // 1.5초 프로그레스 바 로직
+    const duration = 1500;
+    const interval = 15; // 더 부드러운 애니메이션을 위해 짧은 주기
+    let currentProgress = 0;
+
+    progressIntervalRef.current = setInterval(() => {
+      currentProgress += (interval / duration) * 100;
+      if (currentProgress >= 100) {
+        currentProgress = 100;
+        if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+      }
+      setProgress(currentProgress);
+    }, interval);
+
+    // 1.5초 후 녹화 자동 종료
+    recordingTimeoutRef.current = setTimeout(() => {
+      if (recorderRef.current && recorderRef.current.state === "recording") {
+        recorderRef.current.stop();
+      }
+      if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+    }, duration);
+  }, [isRecording]);
+
   return (
-    // 100dvh를 사용하여 iOS 하단바 영향을 받지 않는 정확한 전체 화면 높이 확보
-    <main className="relative w-full h-[100dvh] bg-black p-1.5 flex items-center justify-center font-sans">
-      
-      {/* 둥근 모서리와 보라색 네온 라인 컨테이너 */}
-      <div className="relative w-full h-full rounded-[44px] border-[3px] border-[#f472b6] overflow-hidden shadow-[0_0_15px_rgba(244,114,182,0.4)] bg-zinc-900">
+    <div className="min-h-screen bg-black flex items-center justify-center sm:p-4">
+      {/* 셋로그 스타일의 카메라 앱 컨테이너 */}
+      <div className="relative w-full h-[100dvh] sm:h-[850px] max-w-[420px] bg-black sm:rounded-[40px] overflow-hidden sm:border-[4px] border-fuchsia-600 sm:shadow-[0_0_40px_rgba(217,70,239,0.4)]">
         
-        {/* 맨 아래 레이어: 실시간 카메라 비디오 */}
+        {/* 상단 프로그레스 바 (녹화 중에만 차오름) */}
+        <div className="absolute top-0 left-0 right-0 h-1.5 bg-gray-800 z-50">
+          <div 
+            className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all ease-linear"
+            style={{ width: `${progress}%`, transitionDuration: progress === 0 ? "0ms" : "15ms" }}
+          />
+        </div>
+
+        {/* 카메라 전환 버튼 */}
+        {!isRecording && !isReplaying && (
+          <button
+            onClick={toggleCamera}
+            className="absolute top-6 right-6 z-50 p-3 bg-black/30 backdrop-blur-md rounded-full text-white hover:bg-black/50 transition-all active:scale-95"
+            aria-label="Switch Camera"
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M20 10.5C20 6.35786 16.6421 3 12.5 3C8.64215 3 5.46461 5.91893 5.04561 9.66667M5.04561 9.66667H7.95455M5.04561 9.66667V6.33333" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M4.00015 13.5C4.00015 17.6421 7.35802 21 11.5002 21C15.358 21 18.5355 18.0811 18.9545 14.3333M18.9545 14.3333H16.0456M18.9545 14.3333V17.6667" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
+        )}
+
+        {/* --- 비디오 레이어 --- */}
+        {/* 1. 실시간 프리뷰 비디오 (리플레이 중일 때는 투명하게 숨김) */}
         <video
-          ref={videoRef}
+          ref={previewVideoRef}
           autoPlay
-          playsInline // iOS 사파리 전체화면 자동 재생 방지 (필수)
+          playsInline
           muted
-          className="absolute inset-0 w-full h-full object-cover z-0"
+          style={{ transform: facingMode === "user" ? "scaleX(-1)" : "scaleX(1)" }}
+          className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
+            isReplaying ? "opacity-0 z-0" : "opacity-100 z-10"
+          }`}
         />
 
-        {/* 맨 위 레이어: UI 오버레이 (pointer-events-none로 터치 통과) */}
-        <div 
-          className="absolute inset-0 z-10 flex flex-col justify-between pointer-events-none p-4 pb-8"
-          style={{ paddingTop: 'max(env(safe-area-inset-top), 1.5rem)' }} // iOS 노치 대응
-        >
-          
-          {/* 상단 닫기(X) 버튼 영역 */}
-          <div className="flex justify-end pointer-events-auto">
-            <button className="w-10 h-10 bg-black/30 backdrop-blur-md rounded-full flex items-center justify-center border border-white/20 active:scale-95 transition-transform">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="white" className="w-5 h-5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
+        {/* 2. 무한 리플레이 비디오 (녹화 완료 후 투명도와 레이어를 올려서 부드럽게 등장) */}
+        <video
+          ref={replayVideoRef}
+          src={recordedUrl || undefined}
+          autoPlay
+          playsInline
+          muted
+          loop
+          style={{ transform: facingMode === "user" ? "scaleX(-1)" : "scaleX(1)" }}
+          className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
+            isReplaying ? "opacity-100 z-20" : "opacity-0 z-0"
+          }`}
+        />
 
-          {/* 화면 중앙부: 90도 회전된 텍스트 */}
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            {/* 중앙 시간 */}
-            <div className="rotate-90 text-white font-extrabold text-5xl tracking-widest drop-shadow-md">
-              9:00
-            </div>
-          </div>
+        {/* --- UI 오버레이 --- */}
+        {/* 가독성을 위한 상하단 다크 그라데이션 */}
+        <div className="absolute inset-0 z-30 pointer-events-none">
+          <div className="absolute top-0 w-full h-32 bg-gradient-to-b from-black/60 to-transparent" />
+          <div className="absolute bottom-0 w-full h-48 bg-gradient-to-t from-black/80 to-transparent" />
+        </div>
 
-          <div className="absolute inset-y-0 right-6 flex items-center pointer-events-none">
-            {/* 우측 텍스트 라벨 */}
-            <div className="rotate-90 text-white/90 font-medium text-lg tracking-[0.3em] drop-shadow-md origin-center">
-              우리가족
-            </div>
-          </div>
-
-          {/* 하단 컨트롤 영역 */}
-          <div className="flex flex-col items-center gap-5 pointer-events-auto pb-2">
-            
-            {/* 플래시 및 줌 배율 영역 */}
-            <div className="relative flex items-center justify-center w-full px-8">
-              {/* 번개(플래시) 아이콘 */}
-              <div className="absolute left-8 rotate-90 text-white drop-shadow-md">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="white" viewBox="0 0 24 24" className="w-5 h-5">
-                  <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-                </svg>
-              </div>
-
-              {/* 줌 배율 텍스트 */}
-              <div className="flex items-center gap-7 text-sm font-semibold tracking-wider">
-                <span className="rotate-90 text-white/80 drop-shadow-md">.5</span>
-                <span className="rotate-90 text-yellow-400 drop-shadow-md">1</span>
-                <span className="rotate-90 text-white/80 drop-shadow-md">2</span>
-                <span className="rotate-90 text-white/80 drop-shadow-md">3</span>
-              </div>
-            </div>
-
-            {/* 메인 촬영(스마일) 버튼 */}
-            <button className="relative flex items-center justify-center w-[76px] h-[76px] rounded-full border-[3px] border-blue-600 bg-transparent active:scale-95 transition-transform shadow-[0_0_20px_rgba(37,99,235,0.5)]">
-              <div className="w-[64px] h-[64px] bg-[#22d3ee] rounded-full flex items-center justify-center border border-blue-500 shadow-inner">
-                <svg viewBox="0 0 24 24" fill="none" className="w-10 h-10 text-blue-950">
-                  <path d="M8 14s1.5 2 4 2 4-2 4-2" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"></path>
-                  <circle cx="9" cy="10" r="1.5" fill="currentColor"></circle>
-                  <circle cx="15" cy="10" r="1.5" fill="currentColor"></circle>
-                </svg>
-              </div>
-            </button>
-
-            {/* 최하단 메뉴 바 */}
-            <div className="flex items-center justify-between w-full px-6 mt-1">
-              {/* 좌측: 타이머 설정 아이콘 등 */}
-              <button className="w-11 h-11 flex items-center justify-center bg-black/40 backdrop-blur-md rounded-full border border-white/10 active:scale-95 transition-transform">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="white" className="w-5 h-5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              </button>
-
-              {/* 중앙: 카메라/로그 탭 */}
-              <div className="flex items-center gap-6 bg-black/50 backdrop-blur-md px-6 py-3.5 rounded-[30px] border border-white/10 shadow-lg">
-                <button className="text-white font-medium text-sm drop-shadow-sm">카메라</button>
-                <button className="text-white/50 font-medium text-sm">로그</button>
-              </div>
-
-              {/* 우측: 카메라 전환 아이콘 */}
-              <button className="w-11 h-11 flex items-center justify-center bg-black/40 backdrop-blur-md rounded-full border border-white/10 active:scale-95 transition-transform">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="white" className="w-5 h-5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-                </svg>
-              </button>
-            </div>
-
+        {/* 중앙 세로형 "9:00" 텍스트 레이어 (항상 최상단 유지) */}
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-50">
+          <div 
+            className="text-white/90 font-bold text-7xl tracking-[0.2em] font-mono blur-[0.5px] drop-shadow-[0_0_10px_rgba(255,255,255,0.5)]"
+            style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}
+          >
+            9:00
           </div>
         </div>
-      </div>
-      
-      {/* 카메라 권한 거부 / 에러 시 폴백 UI */}
-      {hasPermission === false && (
-        <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center z-50 text-white text-center p-6 backdrop-blur-md pointer-events-auto">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-12 h-12 mb-4 text-gray-400">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z" />
-            <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z" />
-          </svg>
-          <p className="text-lg font-bold mb-2">카메라 접근 권한이 필요합니다.</p>
-          <p className="text-sm text-gray-400 mb-6">주소창 좌측의 'aA' 버튼을 누르거나<br/>설정에서 카메라 권한을 허용해주세요.</p>
-          <button 
-            onClick={() => window.location.reload()} 
-            className="px-6 py-2 bg-blue-600 rounded-full font-semibold"
+
+        {/* 하단 스마일 촬영 버튼 */}
+        <div className="absolute bottom-10 left-0 right-0 flex justify-center items-center z-50">
+          <button
+            onClick={startRecording}
+            disabled={isRecording}
+            className={`
+              relative w-20 h-20 rounded-full flex items-center justify-center
+              transition-all duration-300 outline-none
+              ${isRecording ? "scale-90" : "scale-100 hover:scale-105 active:scale-95"}
+            `}
           >
-            다시 시도
+            {/* 버튼 외부 네온 링 */}
+            <div className={`absolute inset-0 rounded-full border-[3px] border-white transition-all duration-300 ${
+              isRecording ? "border-pink-500 scale-110 shadow-[0_0_15px_rgba(236,72,153,0.8)]" : ""
+            }`} />
+            
+            {/* 버튼 내부 (스마일 아이콘) */}
+            <div className={`
+              w-16 h-16 rounded-full flex items-center justify-center
+              transition-colors duration-300
+              ${isRecording ? "bg-pink-500" : "bg-white"}
+            `}>
+              <svg width="34" height="34" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" stroke={isRecording ? "white" : "black"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M8 14C8 14 9.5 16 12 16C14.5 16 16 14 16 14" stroke={isRecording ? "white" : "black"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M9 9H9.01" stroke={isRecording ? "white" : "black"} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M15 9H15.01" stroke={isRecording ? "white" : "black"} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
           </button>
         </div>
-      )}
-    </main>
+      </div>
+    </div>
   );
 }
