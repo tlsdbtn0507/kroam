@@ -31,7 +31,12 @@ export default function CameraApp() {
 
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: false,
-          video: { facingMode },
+          video: { 
+            facingMode,
+            // 모바일 화면 비율(세로)에 맞는 고해상도 영상을 요청하여 크롭 손실을 최소화
+            width: { ideal: 1080 },
+            height: { ideal: 1920 }
+          },
         });
         
         streamRef.current = stream;
@@ -141,9 +146,9 @@ export default function CameraApp() {
   }, [isRecording]);
 
   return (
-    <div className="min-h-screen bg-black flex items-center justify-center sm:p-4">
-      {/* 테두리/그림자 렌더링 문제 해결: 모바일에서는 테두리 적용 제외(sm: 속성 추가) */}
-      <div className="relative w-full h-[100dvh] sm:h-[850px] max-w-[420px] bg-black sm:rounded-[40px] overflow-hidden sm:border-[4px] sm:border-fuchsia-600 sm:shadow-[0_0_40px_rgba(217,70,239,0.4)]">
+    <div className="w-full h-[100dvh] bg-black flex items-center justify-center sm:min-h-screen sm:h-auto sm:p-4">
+      {/* 테두리/그림자 렌더링 문제 해결: 모바일에서는 테두리 적용 제외, 정확히 부모 높이 채움 */}
+      <div className="relative w-full h-full sm:h-[850px] max-w-[420px] bg-black sm:rounded-[40px] overflow-hidden sm:border-[4px] sm:border-fuchsia-600 sm:shadow-[0_0_40px_rgba(217,70,239,0.4)]">
         
         {/* 상단 프로그레스 바 (노치/다이내믹 아일랜드 Safe Area 대응) */}
         <div 
