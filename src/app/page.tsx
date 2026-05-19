@@ -25,14 +25,13 @@ export default function CameraApp() {
 
     const initCamera = async () => {
       try {
-        // 기존 스트림 정리
         if (streamRef.current) {
           streamRef.current.getTracks().forEach((track) => track.stop());
         }
 
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false, // 추후 싱크/인스턴스 문제 방지
-          video: { facingMode }, // 상태값에 따라 전면/후면 전환
+          audio: false,
+          video: { facingMode },
         });
         
         streamRef.current = stream;
@@ -49,12 +48,23 @@ export default function CameraApp() {
     initCamera();
 
     return () => {
-      // 컴포넌트 언마운트 또는 facingMode 변경 시 이전 스트림 정리
       if (currentStream) {
         currentStream.getTracks().forEach((track) => track.stop());
       }
     };
   }, [facingMode]);
+
+  // 원인 C 해결: 아이폰 Safari 자동재생(Auto-play) 강제 트리거
+  useEffect(() => {
+    if (isReplaying && replayVideoRef.current && recordedUrl) {
+      const video = replayVideoRef.current;
+      video.load(); // iOS Safari를 위한 강제 로드
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((e) => console.error("Auto-play failed:", e));
+      }
+    }
+  }, [isReplaying, recordedUrl]);
 
   // 메모리 및 타이머 해제
   useEffect(() => {
@@ -74,7 +84,6 @@ export default function CameraApp() {
   const startRecording = useCallback(() => {
     if (!streamRef.current || isRecording) return;
 
-    // 이전 URL 메모리 해제
     if (lastRecordedUrlRef.current) {
       URL.revokeObjectURL(lastRecordedUrlRef.current);
     }
@@ -84,7 +93,6 @@ export default function CameraApp() {
     setProgress(0);
     chunksRef.current = [];
 
-    // MediaRecorder 설정 (브라우저 호환성을 위해 기본 설정 사용)
     const recorder = new MediaRecorder(streamRef.current);
     recorderRef.current = recorder;
 
@@ -95,23 +103,24 @@ export default function CameraApp() {
     };
 
     recorder.onstop = () => {
-      // iOS 등 다양한 환경 호환성을 위해 타입 없이 Blob 생성
-      const blob = new Blob(chunksRef.current);
+      // 원인 B 해결: MIME 타입 첫 번째 청크 기준으로 명시 (없으면 mp4 맹신)
+      const mimeType = chunksRef.current[0]?.type || "video/mp4";
+      const blob = new Blob(chunksRef.current, { type: mimeType });
       const url = URL.createObjectURL(blob);
       lastRecordedUrlRef.current = url;
+      
       setRecordedUrl(url);
       setIsReplaying(true);
       setIsRecording(false);
       setProgress(0);
     };
 
-    // 녹화 시작
-    recorder.start(10); // 타임슬라이스 주기로 데이터를 더 자주 받음
+    // 원인 A 해결: 타임슬라이스 제거 (iOS 파편화 버그 방지 - 한 번에 모아서 뱉음)
+    recorder.start(); 
     setIsRecording(true);
 
-    // 1.5초 프로그레스 바 로직
     const duration = 1500;
-    const interval = 15; // 더 부드러운 애니메이션을 위해 짧은 주기
+    const interval = 15;
     let currentProgress = 0;
 
     progressIntervalRef.current = setInterval(() => {
@@ -123,7 +132,6 @@ export default function CameraApp() {
       setProgress(currentProgress);
     }, interval);
 
-    // 1.5초 후 녹화 자동 종료
     recordingTimeoutRef.current = setTimeout(() => {
       if (recorderRef.current && recorderRef.current.state === "recording") {
         recorderRef.current.stop();
@@ -134,22 +142,26 @@ export default function CameraApp() {
 
   return (
     <div className="min-h-screen bg-black flex items-center justify-center sm:p-4">
-      {/* 셋로그 스타일의 카메라 앱 컨테이너 */}
-      <div className="relative w-full h-[100dvh] sm:h-[850px] max-w-[420px] bg-black sm:rounded-[40px] overflow-hidden sm:border-[4px] border-fuchsia-600 sm:shadow-[0_0_40px_rgba(217,70,239,0.4)]">
+      {/* 테두리/그림자 렌더링 문제 해결: 모바일에서는 테두리 적용 제외(sm: 속성 추가) */}
+      <div className="relative w-full h-[100dvh] sm:h-[850px] max-w-[420px] bg-black sm:rounded-[40px] overflow-hidden sm:border-[4px] sm:border-fuchsia-600 sm:shadow-[0_0_40px_rgba(217,70,239,0.4)]">
         
-        {/* 상단 프로그레스 바 (녹화 중에만 차오름) */}
-        <div className="absolute top-0 left-0 right-0 h-1.5 bg-gray-800 z-50">
+        {/* 상단 프로그레스 바 (노치/다이내믹 아일랜드 Safe Area 대응) */}
+        <div 
+          className="absolute left-0 right-0 h-1.5 bg-gray-800 z-50"
+          style={{ top: "max(env(safe-area-inset-top), 0px)" }}
+        >
           <div 
             className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all ease-linear"
             style={{ width: `${progress}%`, transitionDuration: progress === 0 ? "0ms" : "15ms" }}
           />
         </div>
 
-        {/* 카메라 전환 버튼 */}
+        {/* 카메라 전환 버튼 (Safe Area 대응) */}
         {!isRecording && !isReplaying && (
           <button
             onClick={toggleCamera}
-            className="absolute top-6 right-6 z-50 p-3 bg-black/30 backdrop-blur-md rounded-full text-white hover:bg-black/50 transition-all active:scale-95"
+            className="absolute right-4 z-50 p-3 bg-black/30 backdrop-blur-md rounded-full text-white hover:bg-black/50 transition-all active:scale-95"
+            style={{ top: "max(env(safe-area-inset-top, 24px), 24px)" }}
             aria-label="Switch Camera"
           >
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -159,8 +171,6 @@ export default function CameraApp() {
           </button>
         )}
 
-        {/* --- 비디오 레이어 --- */}
-        {/* 1. 실시간 프리뷰 비디오 (리플레이 중일 때는 투명하게 숨김) */}
         <video
           ref={previewVideoRef}
           autoPlay
@@ -172,7 +182,6 @@ export default function CameraApp() {
           }`}
         />
 
-        {/* 2. 무한 리플레이 비디오 (녹화 완료 후 투명도와 레이어를 올려서 부드럽게 등장) */}
         <video
           ref={replayVideoRef}
           src={recordedUrl || undefined}
@@ -186,14 +195,11 @@ export default function CameraApp() {
           }`}
         />
 
-        {/* --- UI 오버레이 --- */}
-        {/* 가독성을 위한 상하단 다크 그라데이션 */}
         <div className="absolute inset-0 z-30 pointer-events-none">
           <div className="absolute top-0 w-full h-32 bg-gradient-to-b from-black/60 to-transparent" />
           <div className="absolute bottom-0 w-full h-48 bg-gradient-to-t from-black/80 to-transparent" />
         </div>
 
-        {/* 중앙 세로형 "9:00" 텍스트 레이어 (항상 최상단 유지) */}
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-50">
           <div 
             className="text-white/90 font-bold text-7xl tracking-[0.2em] font-mono blur-[0.5px] drop-shadow-[0_0_10px_rgba(255,255,255,0.5)]"
@@ -203,8 +209,11 @@ export default function CameraApp() {
           </div>
         </div>
 
-        {/* 하단 스마일 촬영 버튼 */}
-        <div className="absolute bottom-10 left-0 right-0 flex justify-center items-center z-50">
+        {/* 하단 스마일 촬영 버튼 (하단 홈 인디케이터 Safe Area 대응) */}
+        <div 
+          className="absolute left-0 right-0 flex justify-center items-center z-50"
+          style={{ bottom: "max(env(safe-area-inset-bottom, 40px), 40px)" }}
+        >
           <button
             onClick={startRecording}
             disabled={isRecording}
@@ -214,12 +223,10 @@ export default function CameraApp() {
               ${isRecording ? "scale-90" : "scale-100 hover:scale-105 active:scale-95"}
             `}
           >
-            {/* 버튼 외부 네온 링 */}
             <div className={`absolute inset-0 rounded-full border-[3px] border-white transition-all duration-300 ${
               isRecording ? "border-pink-500 scale-110 shadow-[0_0_15px_rgba(236,72,153,0.8)]" : ""
             }`} />
             
-            {/* 버튼 내부 (스마일 아이콘) */}
             <div className={`
               w-16 h-16 rounded-full flex items-center justify-center
               transition-colors duration-300
